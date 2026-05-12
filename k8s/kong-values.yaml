@@ -1,0 +1,102 @@
+# Kong Ingress Controller — Helm values para EKS
+# Versión: Kong 3.9 OSS, modo DB-less
+#
+# Instalación:
+#   helm repo add kong https://charts.konghq.com
+#   helm repo update
+#   helm upgrade --install kong kong/ingress \
+#     --namespace kong --create-namespace \
+#     -f k8s/kong-values.yaml
+#
+# Prerequisito: el ConfigMap kong-declarative-config debe existir antes del deploy.
+# Generarlo desde el template:
+#   ./kong/scripts/init.sh  # genera kong/kong.yaml con la clave pública embebida
+#   kubectl create configmap kong-declarative-config \
+#     --from-file=kong.yaml=kong/kong.yaml \
+#     -n kong
+
+# ─── Controller ────────────────────────────────────────────────────────────────
+controller:
+  enabled: true
+  ingressClass: kong
+  installCRDs: false   # CRDs se instalan por separado con `helm install kong/kong-crd`
+
+# ─── Gateway (proxy) ───────────────────────────────────────────────────────────
+gateway:
+  enabled: true
+  image:
+    repository: kong
+    tag: "3.9"
+
+  env:
+    database: "off"
+    declarative_config: /usr/local/kong/declarative/kong.yaml
+    log_level: info
+    proxy_access_log: /dev/stdout
+    proxy_error_log: /dev/stderr
+    admin_access_log: /dev/stdout
+    admin_error_log: /dev/stderr
+
+  # Monta el ConfigMap con la configuración declarativa
+  volumes:
+    - name: kong-config
+      configMap:
+        name: kong-declarative-config
+
+  volumeMounts:
+    - name: kong-config
+      mountPath: /usr/local/kong/declarative
+      readOnly: true
+
+  # Admin API — solo accesible dentro del cluster
+  admin:
+    enabled: true
+    http:
+      enabled: true
+      servicePort: 8001
+      containerPort: 8001
+    type: ClusterIP
+
+  # Proxy — expuesto vía AWS ALB (Ingress separado gestionado por aws-load-balancer-controller)
+  proxy:
+    enabled: true
+    http:
+      enabled: true
+      servicePort: 80
+      containerPort: 8000
+    tls:
+      enabled: true
+      servicePort: 443
+      containerPort: 8443
+    type: ClusterIP   # ALB hace el terminate TLS; Kong escucha en ClusterIP
+
+  # HPA para producción
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 70
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 512Mi
+
+  # Healthchecks de K8s
+  readinessProbe:
+    httpGet:
+      path: /status
+      port: 8001
+      scheme: HTTP
+    initialDelaySeconds: 15
+    periodSeconds: 10
+  livenessProbe:
+    httpGet:
+      path: /status
+      port: 8001
+      scheme: HTTP
+    initialDelaySeconds: 15
+    periodSeconds: 20

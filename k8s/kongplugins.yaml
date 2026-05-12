@@ -1,0 +1,125 @@
+# KongPlugin CRDs — EduTrack Auth Service
+# Paridad directa con las entradas plugins: de kong.yaml.template.
+#
+# Aplicar:
+#   kubectl apply -f k8s/kongplugins.yaml -n edutrack
+#
+# Cada KongPlugin es referenciado desde los recursos Ingress via la annotation:
+#   konghq.com/plugins: <nombre1>,<nombre2>
+---
+# ─── Rate Limiting (global) ────────────────────────────────────────────────────
+# 200 req/min por IP. En prod usa Redis para estado compartido entre réplicas.
+# En local (kong.yaml) usa policy: local.
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: edutrack-rate-limiting
+  namespace: edutrack
+  annotations:
+    kubernetes.io/ingress.class: kong
+plugin: rate-limiting
+config:
+  minute: 200
+  policy: redis          # Cambiar a 'local' si no hay Redis disponible
+  redis_host: redis      # Servicio K8s del Redis cluster
+  redis_port: 6379
+  limit_by: ip
+  hide_client_headers: false
+---
+# ─── Correlation ID (global) ───────────────────────────────────────────────────
+# Inyecta X-Correlation-ID en cada request (BE-TRV-004).
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: edutrack-correlation-id
+  namespace: edutrack
+  annotations:
+    kubernetes.io/ingress.class: kong
+plugin: correlation-id
+config:
+  header_name: X-Correlation-ID
+  generator: uuid#1
+  echo_downstream: true
+---
+# ─── JWT Validation (solo rutas protegidas) ────────────────────────────────────
+# Valida firma RS256 y expiración. La credencial JWT (clave pública) se configura
+# en kong.yaml para local; en K8s se gestiona vía KongConsumer + Secret.
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: edutrack-jwt
+  namespace: edutrack
+  annotations:
+    kubernetes.io/ingress.class: kong
+plugin: jwt
+config:
+  uri_param_names: []
+  cookie_names: []
+  key_claim_name: iss
+  claims_to_verify:
+    - exp
+---
+# ─── Post-function: propagación de claims JWT como headers ────────────────────
+# Corre DESPUÉS de la validación JWT (priority 0 < jwt priority 1005).
+# Extrae sub → X-User-Id y roles[] → X-User-Roles.
+# Elimina Authorization antes de llegar al microservicio.
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: edutrack-jwt-claims-propagation
+  namespace: edutrack
+  annotations:
+    kubernetes.io/ingress.class: kong
+plugin: post-function
+config:
+  access:
+    - |
+      local token = kong.request.get_header("authorization")
+      if not token then return end
+      local stripped = token:match("^[Bb]earer%s+(.+)$")
+      if not stripped then return end
+      local _, payload_b64 = stripped:match("^([^.]+)%.([^.]+)")
+      if not payload_b64 then return end
+      local pad = (4 - #payload_b64 % 4) % 4
+      local b64 = payload_b64:gsub("%-", "+"):gsub("_", "/") .. ("="):rep(pad)
+      local decoded = ngx.decode_base64(b64)
+      if not decoded then return end
+      local ok, claims = pcall(require("cjson").decode, decoded)
+      if not ok or not claims then return end
+      kong.service.request.set_header("X-User-Id", claims.sub or "")
+      if type(claims.roles) == "table" then
+        kong.service.request.set_header("X-User-Roles", table.concat(claims.roles, ","))
+      elseif claims.roles then
+        kong.service.request.set_header("X-User-Roles", tostring(claims.roles))
+      end
+      kong.service.request.clear_header("authorization")
+---
+# ─── KongConsumer + credencial JWT (clave pública RS256) ──────────────────────
+# En K8s la clave pública se almacena como Secret de K8s (no en texto plano en el YAML).
+# Crear el Secret antes de aplicar este archivo:
+#
+#   kubectl create secret generic edutrack-jwt-secret \
+#     --from-literal=kongCredType=jwt \
+#     --from-literal=algorithm=RS256 \
+#     --from-literal=key=edutrack-auth \
+#     --from-file=rsa_public_key=./kong/kong.yaml \
+#     -n edutrack
+#
+# O usando el script:
+#   PUB=$(cat ../edutrack-ms-auth/src/main/resources/publicKey.pem)
+#   kubectl create secret generic edutrack-jwt-secret \
+#     --from-literal=kongCredType=jwt \
+#     --from-literal=algorithm=RS256 \
+#     --from-literal=key=edutrack-auth \
+#     --from-literal=rsa_public_key="$PUB" \
+#     -n edutrack
+apiVersion: configuration.konghq.com/v1
+kind: KongConsumer
+metadata:
+  name: edutrack-jwt-issuer
+  namespace: edutrack
+  annotations:
+    kubernetes.io/ingress.class: kong
+username: edutrack-jwt-issuer
+credentials:
+  - edutrack-jwt-secret

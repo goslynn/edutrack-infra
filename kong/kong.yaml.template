@@ -1,0 +1,146 @@
+## Kong Gateway — configuración declarativa DB-less
+## EduTrack Auth Service v1
+##
+## USO LOCAL:
+##   ./kong/scripts/init.sh   → genera kong/kong.yaml con la clave pública embebida
+##   docker-compose up -d
+##
+## USO EKS:
+##   El mismo archivo (generado) se monta como ConfigMap. Ver k8s/kong-values.yaml.
+##
+_format_version: "3.0"
+_transform: true
+
+# ─── Consumer necesario para el plugin JWT ───────────────────────────────────
+# El plugin jwt requiere asociar el JWT a un consumer via el claim configurado en key_claim_name.
+# Aquí el consumer es simbólico; lo importante es el jwt_secret con la clave pública RS256.
+consumers:
+  - username: edutrack-jwt-issuer
+
+jwt_secrets:
+  - consumer: edutrack-jwt-issuer
+    algorithm: RS256
+    # Debe coincidir con el claim 'iss' de los tokens emitidos por Auth Service.
+    # Configurado en application.properties: mp.jwt.issuer=edutrack-auth
+    key: edutrack-auth
+    rsa_public_key: |
+__PUBLIC_KEY__
+
+# ─── Upstreams con health checks (circuit breaker nivel gateway) ─────────────
+upstreams:
+  - name: auth-upstream
+    targets:
+      - target: auth:8080
+        weight: 100
+    healthchecks:
+      active:
+        type: http
+        http_path: /q/health/live
+        concurrency: 2
+        healthy:
+          interval: 10
+          successes: 2
+        unhealthy:
+          interval: 5
+          http_failures: 3
+          tcp_failures: 3
+      passive:
+        healthy:
+          successes: 5
+        unhealthy:
+          http_failures: 5
+          tcp_failures: 3
+
+# ─── Servicios ───────────────────────────────────────────────────────────────
+services:
+
+  # Endpoints públicos: no requieren JWT
+  - name: auth-public
+    host: auth-upstream
+    port: 80
+    protocol: http
+    routes:
+      - name: auth-login
+        paths:
+          - ~/auth/login$
+        methods: [POST]
+        strip_path: false
+      - name: auth-refresh
+        paths:
+          - ~/auth/refresh$
+        methods: [POST]
+        strip_path: false
+      - name: auth-jwks
+        paths:
+          - ~/.well-known/jwks.json$
+        methods: [GET]
+        strip_path: false
+
+  # Endpoints protegidos: requieren JWT válido (RS256, iss=edutrack-auth, exp válido)
+  - name: auth-protected
+    host: auth-upstream
+    port: 80
+    protocol: http
+    routes:
+      - name: auth-protected-route
+        paths:
+          - ~/auth
+        methods: [GET, POST, PUT, DELETE]
+        strip_path: false
+        # Prioridad más baja que las rutas públicas para que no capturen /auth/login y /auth/refresh
+        regex_priority: 0
+    plugins:
+      # Validación JWT RS256
+      - name: jwt
+        config:
+          uri_param_names: []
+          cookie_names: []
+          key_claim_name: iss
+          claims_to_verify:
+            - exp
+
+      # Extrae claims del JWT y los propaga como headers internos X-User-Id y X-User-Roles.
+      # Corre DESPUÉS de la validación JWT (post-function priority=0 < jwt priority=1005).
+      # También elimina el header Authorization antes de llegar al microservicio.
+      - name: post-function
+        config:
+          access:
+            - |
+              local token = kong.request.get_header("authorization")
+              if not token then return end
+              local stripped = token:match("^[Bb]earer%s+(.+)$")
+              if not stripped then return end
+              local _, payload_b64 = stripped:match("^([^.]+)%.([^.]+)")
+              if not payload_b64 then return end
+              local pad = (4 - #payload_b64 % 4) % 4
+              local b64 = payload_b64:gsub("%-", "+"):gsub("_", "/") .. ("="):rep(pad)
+              local decoded = ngx.decode_base64(b64)
+              if not decoded then return end
+              local ok, claims = pcall(require("cjson").decode, decoded)
+              if not ok or not claims then return end
+              kong.service.request.set_header("X-User-Id", claims.sub or "")
+              if type(claims.roles) == "table" then
+                kong.service.request.set_header("X-User-Roles", table.concat(claims.roles, ","))
+              elseif claims.roles then
+                kong.service.request.set_header("X-User-Roles", tostring(claims.roles))
+              end
+              kong.service.request.clear_header("authorization")
+
+# ─── Plugins globales (aplican a todos los servicios) ────────────────────────
+plugins:
+
+  # Rate limiting: 200 req/min por IP (BE-GW-003)
+  # En producción cambiar policy a 'redis' para estado compartido entre réplicas de Kong.
+  - name: rate-limiting
+    config:
+      minute: 200
+      policy: local
+      limit_by: ip
+      hide_client_headers: false
+
+  # Correlation ID para trazabilidad distribuida (BE-TRV-004)
+  - name: correlation-id
+    config:
+      header_name: X-Correlation-ID
+      generator: uuid#1
+      echo_downstream: true

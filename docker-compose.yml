@@ -1,0 +1,118 @@
+version: "3.9"
+
+# ─── Variables de entorno compartidas por el Auth Service ───────────────────
+x-auth-env: &auth-env
+  DB_HOST: postgres
+  DB_PORT: 5432
+  DB_NAME: ${DB_NAME:-edutrack}
+  DB_USER: ${DB_USER:-auth_user}
+  DB_PASSWORD: ${DB_PASSWORD:-auth_pass}
+  CONSUL_HOST: consul
+  CONSUL_PORT: 8500
+  AUTH_SEED_ADMIN_EMAIL: ${AUTH_SEED_ADMIN_EMAIL:-admin@edutrack.cl}
+  AUTH_SEED_ADMIN_PASSWORD: ${AUTH_SEED_ADMIN_PASSWORD:-changeme123!}
+  AUTH_SEED_ADMIN_DISPLAY_NAME: ${AUTH_SEED_ADMIN_DISPLAY_NAME:-Administrador}
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  # Base de datos compartida; en prod → Amazon RDS (shared DB, schemas separados)
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-edutrack}
+      POSTGRES_USER: ${DB_USER:-auth_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-auth_pass}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DB_USER:-auth_user}", "-d", "${DB_NAME:-edutrack}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Auth Service ───────────────────────────────────────────────────────────
+  # Puerto 8080 interno — accesible SOLO a través de Kong (no expuesto al host)
+  auth:
+    build:
+      context: ${AUTH_SERVICE_PATH:-../edutrack-ms-auth}
+      dockerfile: src/main/docker/Dockerfile.jvm
+    image: edutrack/auth:local
+    environment:
+      <<: *auth-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/q/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # ── Kong Gateway (DB-less) ─────────────────────────────────────────────────
+  # Proxy en localhost:8080 → 8000 interno de Kong
+  # Admin API en localhost:8001
+  kong:
+    image: kong:3.9
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/declarative/kong.yaml
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_LOG_LEVEL: info
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+    volumes:
+      - ./kong/kong.yaml:/usr/local/kong/declarative/kong.yaml:ro
+    ports:
+      - "8080:8000"    # Punto de entrada único para todo el tráfico API
+      - "8001:8001"    # Admin API (solo local; no exponer en prod)
+    depends_on:
+      auth:
+        condition: service_healthy
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Consul ─────────────────────────────────────────────────────────────────
+  # Service registry — UI en localhost:8500
+  # En prod → Consul Helm chart (multi-node) en EKS
+  consul:
+    image: consul:1.19
+    command: >
+      agent -server -bootstrap -ui
+      -client=0.0.0.0
+      -config-file=/consul/config/consul-config.hcl
+    volumes:
+      - ./consul/consul-config.hcl:/consul/config/consul-config.hcl:ro
+      - consul_data:/consul/data
+    ports:
+      - "8500:8500"    # UI + API HTTP
+    environment:
+      CONSUL_BIND_INTERFACE: eth0
+
+  # ── RabbitMQ ───────────────────────────────────────────────────────────────
+  # Message broker para eventos asíncronos (Student/Assessment/Annotation → Notification)
+  # Management UI en localhost:15672
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-edutrack}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-edutrack_pass}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"      # AMQP
+      - "15672:15672"    # Management UI
+
+volumes:
+  postgres_data:
+  consul_data:
+  rabbitmq_data:
