@@ -2,6 +2,11 @@ worker_processes auto;
 error_log /dev/stderr warn;
 pid /tmp/nginx.pid;
 
+# nginx borra env vars por defecto — declararlas explícitamente para que os.getenv() funcione en Lua
+env JWT_PUBLIC_KEY;
+env UPSTREAM_HOST_PATTERN;
+env JWKS_SERVICE;
+
 events {
     worker_connections 1024;
 }

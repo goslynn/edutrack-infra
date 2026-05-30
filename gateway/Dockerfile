@@ -1,7 +1,8 @@
-FROM openresty/openresty:1.25.3.2-alpine
+FROM openresty/openresty:1.25.3.1-alpine
 
+# gettext provee envsubst (usado en entrypoint para inyectar el DNS resolver)
 # lua-resty-jwt: validación RS256
-RUN opm get cdbattags/lua-resty-jwt
+RUN apk add --no-cache gettext && opm get cdbattags/lua-resty-jwt
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
