@@ -2,18 +2,23 @@
 ## EduTrack Auth Service v1
 ##
 ## USO LOCAL:
-##   ./kong/scripts/init.sh   → genera kong/kong.yaml con la clave pública embebida
+##   cp .env.example .env           # y ajusta KONG_RSA_PUBLIC_KEY con el contenido del .pem
 ##   docker-compose up -d
 ##
 ## USO EKS:
-##   El mismo archivo (generado) se monta como ConfigMap. Ver k8s/kong-values.yaml.
+##   El mismo archivo se monta como ConfigMap. La llave pública se gestiona
+##   vía KongConsumer + K8s Secret (ver k8s/kongplugins.yaml).
 ##
 _format_version: "3.0"
 _transform: true
 
+# ─── Vault: lee secretos desde variables de entorno ──────────────────────────
+# KONG_RSA_PUBLIC_KEY debe contener el PEM completo de la clave pública RS256.
+vaults:
+  - name: env
+    prefix: env
+
 # ─── Consumer necesario para el plugin JWT ───────────────────────────────────
-# El plugin jwt requiere asociar el JWT a un consumer via el claim configurado en key_claim_name.
-# Aquí el consumer es simbólico; lo importante es el jwt_secret con la clave pública RS256.
 consumers:
   - username: edutrack-jwt-issuer
 
@@ -23,8 +28,7 @@ jwt_secrets:
     # Debe coincidir con el claim 'iss' de los tokens emitidos por Auth Service.
     # Configurado en application.properties: mp.jwt.issuer=edutrack-auth
     key: edutrack-auth
-    rsa_public_key: |
-__PUBLIC_KEY__
+    rsa_public_key: "{vault://env/KONG_RSA_PUBLIC_KEY}"
 
 # ─── Upstreams con health checks (circuit breaker nivel gateway) ─────────────
 upstreams:
@@ -90,7 +94,6 @@ services:
         # Prioridad más baja que las rutas públicas para que no capturen /auth/login y /auth/refresh
         regex_priority: 0
     plugins:
-      # Validación JWT RS256
       - name: jwt
         config:
           uri_param_names: []
@@ -99,38 +102,17 @@ services:
           claims_to_verify:
             - exp
 
-      # Extrae claims del JWT y los propaga como headers internos X-User-Id y X-User-Roles.
       # Corre DESPUÉS de la validación JWT (post-function priority=0 < jwt priority=1005).
-      # También elimina el header Authorization antes de llegar al microservicio.
       - name: post-function
         config:
           access:
-            - |
-              local token = kong.request.get_header("authorization")
-              if not token then return end
-              local stripped = token:match("^[Bb]earer%s+(.+)$")
-              if not stripped then return end
-              local _, payload_b64 = stripped:match("^([^.]+)%.([^.]+)")
-              if not payload_b64 then return end
-              local pad = (4 - #payload_b64 % 4) % 4
-              local b64 = payload_b64:gsub("%-", "+"):gsub("_", "/") .. ("="):rep(pad)
-              local decoded = ngx.decode_base64(b64)
-              if not decoded then return end
-              local ok, claims = pcall(require("cjson").decode, decoded)
-              if not ok or not claims then return end
-              kong.service.request.set_header("X-User-Id", claims.sub or "")
-              if type(claims.roles) == "table" then
-                kong.service.request.set_header("X-User-Roles", table.concat(claims.roles, ","))
-              elseif claims.roles then
-                kong.service.request.set_header("X-User-Roles", tostring(claims.roles))
-              end
-              kong.service.request.clear_header("authorization")
+            - "dofile('/usr/local/kong/lua/jwt_claims_propagation.lua')"
 
 # ─── Plugins globales (aplican a todos los servicios) ────────────────────────
 plugins:
 
-  # Rate limiting: 200 req/min por IP (BE-GW-003)
-  # En producción cambiar policy a 'redis' para estado compartido entre réplicas de Kong.
+  # Rate limiting: 200 req/min por IP
+  # En producción usar policy: redis para estado compartido entre réplicas de Kong.
   - name: rate-limiting
     config:
       minute: 200
@@ -138,9 +120,9 @@ plugins:
       limit_by: ip
       hide_client_headers: false
 
-  # Correlation ID para trazabilidad distribuida (BE-TRV-004)
+  # Correlation ID para trazabilidad distribuida
   - name: correlation-id
     config:
       header_name: X-Correlation-ID
-      generator: uuid#1
+      generator: uuid#counter
       echo_downstream: true
