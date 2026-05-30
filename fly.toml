@@ -1,0 +1,38 @@
+# API Gateway — Fly.io
+# Despliegue: fly deploy --config fly.toml
+#
+# Secrets (una sola vez):
+#   fly secrets set JWT_PUBLIC_KEY="$(cat <ruta>/publicKey.pem)"
+#
+# El resto de las variables de entorno van en [env] — no son sensibles.
+
+app            = "edutrack-gateway"
+primary_region = "scl"
+
+[build]
+  dockerfile = "gateway/Dockerfile"
+
+[env]
+  # Patrón de upstream: {service} se reemplaza con el primer segmento del path.
+  # edutrack-auth.fly.internal → app auth registrada en Fly.io
+  UPSTREAM_HOST_PATTERN = "edutrack-{service}.fly.internal:8080"
+
+  # Servicio que responde /.well-known/jwks.json
+  JWKS_SERVICE = "auth"
+
+[http_service]
+  internal_port       = 8080
+  force_https         = true
+  auto_stop_machines  = true
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    type       = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+[[vm]]
+  memory   = "256mb"
+  cpu_kind = "shared"
+  cpus     = 1

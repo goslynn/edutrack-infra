@@ -1,0 +1,37 @@
+version: "3.9"
+
+# API Gateway — desarrollo local
+#
+# Prerequisito: copiar .env.example → .env y completar las variables.
+# Los microservicios se conectan a esta red desde sus propios composes:
+#
+#   networks:
+#     edutrack:
+#       external: true
+
+services:
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: edutrack/gateway:local
+    env_file: .env
+    environment:
+      UPSTREAM_HOST_PATTERN: "{service}:8080"
+      JWKS_SERVICE: "auth"
+    ports:
+      - "8080:8080"    # Punto de entrada único
+    networks:
+      - edutrack
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  edutrack:
+    name: edutrack
+    driver: bridge
