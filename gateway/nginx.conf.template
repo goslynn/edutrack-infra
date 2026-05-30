@@ -1,0 +1,72 @@
+worker_processes auto;
+error_log /dev/stderr warn;
+pid /tmp/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    # DNS resolver extraído de /etc/resolv.conf en el entrypoint
+    resolver ${RESOLVER} valid=10s ipv6=off;
+
+    # Path de los módulos Lua del gateway
+    lua_package_path '/etc/nginx/lua/?.lua;;';
+
+    # Rate limiting: 200 req/min por IP
+    limit_req_zone $binary_remote_addr zone=api:10m rate=200r/m;
+    limit_req_status 429;
+
+    # Correlation ID: respeta el header entrante o genera uno desde el request_id de nginx
+    map $http_x_correlation_id $correlation_id {
+        ""      $request_id;
+        default $http_x_correlation_id;
+    }
+
+    server {
+        listen 8080;
+        server_tokens off;
+
+        # Headers que viajan a todos los upstreams
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Forwarded-For  $proxy_add_x_forwarded_for;
+        proxy_set_header X-Correlation-ID $correlation_id;
+
+        # Header de vuelta al cliente
+        add_header X-Correlation-ID $correlation_id always;
+
+        # ── Rutas públicas — sin JWT ──────────────────────────────────────
+
+        location ~ ^/[^/]+/login$ {
+            limit_req zone=api burst=20 nodelay;
+            set $upstream_host "";
+            access_by_lua_file /etc/nginx/lua/upstream.lua;
+            proxy_pass http://$upstream_host;
+        }
+
+        location ~ ^/[^/]+/refresh$ {
+            limit_req zone=api burst=20 nodelay;
+            set $upstream_host "";
+            access_by_lua_file /etc/nginx/lua/upstream.lua;
+            proxy_pass http://$upstream_host;
+        }
+
+        # JWKS — siempre público; el servicio destino se configura con JWKS_SERVICE
+        location ~ ^/\.well-known/ {
+            limit_req zone=api burst=10 nodelay;
+            set $upstream_host "";
+            access_by_lua_file /etc/nginx/lua/upstream.lua;
+            proxy_pass http://$upstream_host;
+        }
+
+        # ── Rutas protegidas — JWT requerido ─────────────────────────────
+
+        location ~ ^/ {
+            limit_req zone=api burst=50 nodelay;
+            set $upstream_host "";
+            access_by_lua_file /etc/nginx/lua/jwt.lua;
+            proxy_pass http://$upstream_host;
+        }
+    }
+}
