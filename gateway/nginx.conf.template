@@ -57,8 +57,10 @@ http {
             proxy_pass http://$upstream_host;
         }
 
-        # JWKS — siempre público; el servicio destino se configura con JWKS_SERVICE
-        location ~ ^/\.well-known/ {
+        # JWKS — público. Llega como /<servicio>/.well-known/... porque cada MS
+        # declara su serviceId como basePath (@ApplicationPath("/auth")); el
+        # primer segmento es además la clave de enrutamiento del gateway.
+        location ~ ^/[^/]+/\.well-known/ {
             limit_req zone=api burst=10 nodelay;
             set $upstream_host "";
             access_by_lua_file /etc/nginx/lua/upstream.lua;

@@ -9,9 +9,5 @@ if not service or service == "" then
   return ngx.exit(ngx.HTTP_NOT_FOUND)
 end
 
-if service == ".well-known" then
-  service = os.getenv("JWKS_SERVICE") or "auth"
-end
-
 local pattern = os.getenv("UPSTREAM_HOST_PATTERN") or "{service}:8080"
 ngx.var.upstream_host = pattern:gsub("{service}", service)

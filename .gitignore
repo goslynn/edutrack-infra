@@ -2,3 +2,6 @@
 .idea
 .env
 .env.prod
+
+# Claves RS256 — NUNCA versionar (fuente local del JWT_PUBLIC_KEY del gateway)
+.certs/
