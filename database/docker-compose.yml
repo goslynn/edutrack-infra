@@ -1,0 +1,83 @@
+version: "3.9"
+
+# Base de datos compartida — desarrollo local (Shared DB, schema-per-service)
+#
+# UNA sola instancia PostgreSQL en contenedor, con UNA sola base de datos que
+# TODOS los microservicios comparten. Cada MS posee su propio *schema* dentro de
+# esa DB (auth, student, attendance, …) y lo crea con su Flyway
+# (`quarkus.flyway.create-schemas=true`). Aquí no se crean tablas: solo la
+# instancia, la base y (opcional) los schemas vacíos.
+#
+# Reemplaza al PostgreSQL que antes corría FÍSICAMENTE en el host. El dato vive
+# en un volumen Docker persistente, así `compose down` no borra la DB.
+#
+# ── Orden de arranque (no negociable) ──────────────────────────────────────────
+#   1. infra:     cd ../  && docker compose up -d   (crea la red `edutrack`)
+#   2. database:  cd database && docker compose up -d   (este archivo)
+#   3. auth/…:    cd ../../auth && docker compose up -d
+#
+# ── Agnóstico por diseño ───────────────────────────────────────────────────────
+#   valores; (imagen, credenciales, nombre de DB, puerto, volumen, nombre de
+#   contenedor, red) se inyecta por variable de entorno con un default de dev
+#   `${VAR:-default}`. Override por shell o por `infra/database/.env` (gitignored;
+#   ver `.env.example`). Sin secretos versionados.
+#
+# ── Conectividad ───────────────────────────────────────────────────────────────
+#   El contenedor (a) se une a la red `edutrack` — alcanzable por nombre desde
+#   otros contenedores como `postgres`/`database` — y (b) publica 5432 al host.
+#   Publicarlo deja que el `auth/docker-compose.yml` EXISTENTE lo alcance sin
+#   tocarlo: su `DB_HOST: host.docker.internal` → 172.18.0.1:5432 → puerto
+#   publicado. Y de regalo, `./mvnw quarkus:dev` nativo (localhost:5432) golpea
+#   la MISMA base.
+
+services:
+
+  database:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    container_name: ${DB_CONTAINER_NAME:-postgres}
+    hostname: ${DB_CONTAINER_NAME:-postgres}
+
+    environment:
+      POSTGRES_DB: ${DB_NAME:-edutrack_local}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      # Datadir explícito en un subdir del volumen: deja que initdb opere sobre
+      #   un directorio limpio aunque el volumen tenga lost+found u otros restos.
+      PGDATA: /var/lib/postgresql/data/pgdata
+
+    # Persistencia: volumen nombrado y estable (no dependiente del nombre del
+    #   directorio/proyecto compose). `compose down` conserva el dato; para
+    #   resetear: `docker compose down -v`.
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+    # Publica al host para que el compose de auth (host.docker.internal) y el dev
+    #   nativo (localhost) alcancen la misma instancia.
+    ports:
+      - "${DB_PORT:-5432}:5432"
+
+    # Misma red externa que el gateway y los MS. La crea/posee el compose de
+    #   infra (../docker-compose.yml); aquí se referencia como externa.
+    networks:
+      edutrack:
+        aliases:
+          - postgres
+          - database
+
+    restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-edutrack_local}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  db_data:
+    name: ${DB_VOLUME:-edutrack_pgdata}
+
+networks:
+  edutrack:
+    external: true
+    name: ${EDUTRACK_NETWORK:-edutrack}
