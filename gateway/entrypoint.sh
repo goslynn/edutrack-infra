@@ -16,7 +16,7 @@ export RESOLVER
 #     omite, preservando el comportamiento productivo sin tocar el Lua.
 if [ -n "${JWT_PUBLIC_KEY_FILE:-}" ]; then
   if [ ! -f "$JWT_PUBLIC_KEY_FILE" ]; then
-    echo "entrypoint: JWT_PUBLIC_KEY_FILE='$JWT_PUBLIC_KEY_FILE' no existe (¿montaste EDUTRACK_CERTS_DIR, por defecto ./.certs?)" >&2
+    echo "entrypoint: JWT_PUBLIC_KEY_FILE='$JWT_PUBLIC_KEY_FILE' no existe. valor es obligatorio" >&2
     exit 1
   fi
   JWT_PUBLIC_KEY=$(cat "$JWT_PUBLIC_KEY_FILE")
