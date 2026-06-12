@@ -28,9 +28,36 @@ http {
         default $http_x_correlation_id;
     }
 
+    # CORS: refleja el Origin SOLO si coincide con el permitido (${CORS_ALLOW_ORIGIN},
+    #   inyectado por envsubst; default http://localhost:5173). Para cualquier otro
+    #   origen la variable queda vacía y `add_header` con valor vacío se omite ⇒ el
+    #   navegador bloquea. Echo del origen (no `*`) por si en el futuro se usan cookies.
+    map $http_origin $cors_allow_origin {
+        default                   "";
+        "${CORS_ALLOW_ORIGIN}"    "${CORS_ALLOW_ORIGIN}";
+    }
+
     server {
         listen 8080;
         server_tokens off;
+
+        # ── CORS (el gateway es el único punto de entrada; la SPA corre en otro
+        #    origen, así que ES ACÁ donde se responden los headers — `server.cors`
+        #    de Vite solo cubre el dev-server, no este backend). Los add_header son
+        #    a nivel server ⇒ se heredan en todas las locations (ninguna define
+        #    add_header propio, por lo que la herencia no se rompe). ─────────────
+        add_header Access-Control-Allow-Origin  $cors_allow_origin                          always;
+        add_header Access-Control-Allow-Methods  "GET, POST, PUT, PATCH, DELETE, OPTIONS"    always;
+        add_header Access-Control-Allow-Headers  "Authorization, Content-Type, X-Correlation-ID" always;
+        add_header Access-Control-Max-Age        86400                                       always;
+        add_header Vary                          "Origin"                                    always;
+
+        # Preflight: el `if` a nivel server corre en la fase rewrite, ANTES de
+        #   seleccionar location ⇒ corta el OPTIONS antes de Lua/upstream y sin
+        #   consumir rate-limit, respondiendo 204 con los headers CORS de arriba.
+        if ($request_method = OPTIONS) {
+            return 204;
+        }
 
         # Headers que viajan a todos los upstreams
         proxy_http_version 1.1;

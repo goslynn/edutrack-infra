@@ -23,7 +23,13 @@ if [ -n "${JWT_PUBLIC_KEY_FILE:-}" ]; then
   export JWT_PUBLIC_KEY
 fi
 
-envsubst '${RESOLVER}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+# Origen permitido por CORS. Default = SPA en dev (Vite/serve en :5173); se
+#   sobreescribe por env (CORS_ALLOW_ORIGIN) para staging/prod. El gateway, único
+#   punto de entrada, es quien responde los headers CORS al navegador.
+CORS_ALLOW_ORIGIN="${CORS_ALLOW_ORIGIN:-http://localhost:5173}"
+export CORS_ALLOW_ORIGIN
+
+envsubst '${RESOLVER} ${CORS_ALLOW_ORIGIN}' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
 # -c es obligatorio: sin él openresty carga su config por defecto
 #   (/usr/local/openresty/nginx/conf/nginx.conf, listen 80) e ignora la nuestra.
