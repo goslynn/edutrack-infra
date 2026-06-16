@@ -94,6 +94,18 @@ http {
             proxy_pass http://$upstream_host;
         }
 
+        # Metadatos de auto-descripción del servicio — públicos. Namespace
+        # reservado /<servicio>/meta/... donde cada MS publica metadatos suyos
+        # (no datos de dominio): hoy GET /<servicio>/meta/resources con el
+        # catálogo de resource keys asignables. Público para que el frontend/BFF
+        # pueda barrer todos los servicios y poblar la UI de permisos sin token.
+        location ~ ^/[^/]+/meta/ {
+            limit_req zone=api burst=20 nodelay;
+            set $upstream_host "";
+            access_by_lua_file /etc/nginx/lua/upstream.lua;
+            proxy_pass http://$upstream_host;
+        }
+
         # ── Rutas protegidas — JWT requerido ─────────────────────────────
 
         location ~ ^/ {
